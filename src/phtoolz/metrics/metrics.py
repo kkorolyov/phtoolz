@@ -32,10 +32,11 @@ class Promport:
     """Pushes metrics to Prometheus."""
 
     _url: str
-    _buffer = list[str]()
+    _buffer: list[str]
 
     def __init__(self, url: str) -> None:
         self._url = url
+        self._buffer = []
 
     def delete(self, pattern: str):
         """Deletes samples for timeseries matching name `pattern`."""
@@ -63,3 +64,5 @@ class Promport:
             requests.post(f"{self._url}/import", buffer).raise_for_status()
 
         print(f"flushed {len(self._buffer)} lines to {self._url}")
+
+        self._buffer.clear()
