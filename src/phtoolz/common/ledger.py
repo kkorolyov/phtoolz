@@ -3,9 +3,10 @@
 import csv
 import re
 import subprocess
+from collections.abc import Iterable
 from datetime import date
 from decimal import Decimal
-from typing import NamedTuple, Optional
+from typing import NamedTuple
 
 from phtoolz.common.commodity import CommodityValue
 
@@ -17,6 +18,7 @@ class Transaction(NamedTuple):
     account: str
     commodity: str
     quantity: Decimal
+    basis: Decimal
 
 
 class Stats(NamedTuple):
@@ -31,7 +33,7 @@ class Ledger:
 
     path: str
 
-    def __init__(self, path: Optional[str]) -> None:
+    def __init__(self, path: str) -> None:
         """Returns a ledger reading from file at `path`."""
 
         self.path = path
@@ -86,11 +88,58 @@ class Ledger:
     def transactions(self, forecastOnly: bool = False) -> list[Transaction]:
         """Returns transactions (optionally `forecastOnly`) from ledger."""
 
+        # combine transactions with same (account, date, commodity)
+        transactions = dict[tuple[str, date, str], Transaction]()
+        for line, basisLine in zip(
+            self._registerReader(forecastOnly),
+            self._registerReader(forecastOnly, True),
+            strict=True,
+        ):
+            time = date.fromisoformat(line[1])
+            account = line[4]
+
+            quantityCommodity = line[5]
+            basisCommodity = basisLine[5]
+            if " " in quantityCommodity:
+                splitI = quantityCommodity.index(" ")
+                quantity = Decimal(quantityCommodity[:splitI])
+                commodity = quantityCommodity[(splitI + 1) :].replace('"', "")
+            else:
+                quantity = Decimal(quantityCommodity)
+                commodity = "USD"
+
+            basis = Decimal(basisCommodity)
+
+            key = (account, time, commodity)
+            if key in transactions:
+                current = transactions[key]
+                transactions[key] = Transaction(
+                    time,
+                    account,
+                    commodity,
+                    current.quantity + quantity,
+                    current.basis + basis,
+                )
+            else:
+                transactions[key] = Transaction(
+                    time, account, commodity, quantity, basis
+                )
+
+        return list(transactions.values())
+
+    def _registerReader(
+        self,
+        forecastOnly: bool = False,
+        basis: bool = False,
+    ) -> Iterable[tuple[str, str, str, str, str, str, str]]:
+        """Returns a CSV reader over transactions in format (txnidx date code description account amount total)"""
         args = ["hledger", "register", "-O", "tsv"]
         if self.path:
-            args.extend(["-f", self.path])
+            args.extend(("-f", self.path))
         if forecastOnly:
             args.extend(("--forecast=2010..", "tag:generated"))
+        if basis:
+            args.append("-B")
 
         # returns in format (txnidx date code description account amount total)
         reader = csv.reader(
@@ -101,31 +150,7 @@ class Ledger:
         # skip headers
         next(reader)
 
-        # combine transactions with same (account, date, commodity)
-        transactions = dict[tuple[str, date, str], Transaction]()
-        for line in reader:
-            time = date.fromisoformat(line[1])
-            account = line[4]
-
-            quantityCommodity = line[5]
-            if " " in quantityCommodity:
-                splitI = quantityCommodity.index(" ")
-                quantity = Decimal(quantityCommodity[:splitI])
-                commodity = quantityCommodity[(splitI + 1) :].replace('"', "")
-            else:
-                quantity = Decimal(quantityCommodity)
-                commodity = "USD"
-
-            key = (account, time, commodity)
-            if key in transactions:
-                current = transactions[key]
-                transactions[key] = Transaction(
-                    time, account, commodity, current.quantity + quantity
-                )
-            else:
-                transactions[key] = Transaction(time, account, commodity, quantity)
-
-        return list(transactions.values())
+        return reader  # pyright: ignore[reportReturnType]
 
     def stats(self) -> Stats:
         """Returns ledger statistics."""
